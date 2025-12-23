@@ -7,9 +7,11 @@ import * as authorization from "@pulumi/azure-native/authorization";
 import * as random from "@pulumi/random";
 
 const cfg = new pulumi.Config();
+const azureConfig = new pulumi.Config("azure-native");
 
 // This is a normal string (not Output) because it comes from config.
-const location = cfg.require("azure-native:location"); // e.g. "eastus"
+// const location = cfg.require("azure-native:location"); // e.g. "eastus"
+const location = azureConfig.require("location"); // e.g. "eastus"
 
 // Naming inputs (change projectName if you want)
 const project = (cfg.get("projectName") ?? "aksargo").toLowerCase();
@@ -85,8 +87,8 @@ const cluster = new containerservice.ManagedCluster("aks", {
     {
       name: "system",
       mode: "System",
-      count: 2,
-      vmSize: "Standard_DS2_v2",
+      count: 1,
+      vmSize: "Standard_B2s",
       osType: "Linux",
       type: "VirtualMachineScaleSets",
     },
@@ -98,7 +100,7 @@ const cluster = new containerservice.ManagedCluster("aks", {
 // -------------------- RBAC: allow AKS kubelet to pull from ACR --------------------
 // kubelet identity is created by AKS, and used to pull images.
 const kubeletObjectId = cluster.identityProfile.apply(
-  (p) => p?.kubeletidentity?.objectId
+  (p) => p?.kubeletidentity?.objectId!
 );
 
 // AcrPull role definition GUID (built-in)

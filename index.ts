@@ -88,7 +88,7 @@ const cluster = new containerservice.ManagedCluster("aks", {
       name: "system",
       mode: "System",
       count: 1,
-      vmSize: "Standard_B2s",
+      vmSize: "Standard_D2s_v3",
       osType: "Linux",
       type: "VirtualMachineScaleSets",
     },

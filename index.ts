@@ -78,9 +78,7 @@ const cluster = new containerservice.ManagedCluster("aks", {
 
   identity: {
     type: "UserAssigned",
-    userAssignedIdentities: {
-      [aksUai.id]: {},
-    },
+    userAssignedIdentities: [aksUai.id] ,
   },
 
   agentPoolProfiles: [

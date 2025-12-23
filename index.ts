@@ -7,62 +7,76 @@ import * as containerservice from "@pulumi/azure-native/containerservice";
 import * as random from "@pulumi/random";
 
 const cfg = new pulumi.Config();
-const location = cfg.require("azure-native:location"); // you set this to eastus earlier
+
+// Pulumi template sets this earlier (e.g. "eastus")
+const location = cfg.require("azure-native:location");
 
 // Naming inputs
 const project = cfg.get("projectName") ?? "aksargo";
-const env = pulumi.getStack(); // dev
-const region = location.replace(/\s+/g, "").toLowerCase(); // eastus
-const base = `${project}-${env}-${region}`.toLowerCase();
+const env = pulumi.getStack(); // dev / prod / etc
 
-// Random suffix for global-unique names like ACR
+// Normalize region and build base name as an Output<string>
+const region = pulumi.output(location).apply((l) => l.replace(/\s+/g, "").toLowerCase());
+const base = pulumi.interpolate`${project}-${env}-${region}`.apply((b) => b.toLowerCase());
+
+// Random suffix for global-unique names (ACR needs uniqueness)
 const rand = new random.RandomString("rand", {
   length: 6,
   special: false,
   upper: false,
 });
 
-// ---------- Resource Group ----------
-const rgName = `rg-${base}`;
-const rg = new resources.ResourceGroup(rgName, { location });
+// ---------------- Resource Group ----------------
+const rgName = pulumi.interpolate`rg-${base}`;
 
-// ---------- ACR ----------
+const rg = new resources.ResourceGroup("rg", {
+  resourceGroupName: rgName,
+  location,
+});
+
+// ---------------- ACR ----------------
 const acrName = pulumi
   .interpolate`acr${base}${rand.result}`
   .apply((s) => s.replace(/[^a-z0-9]/g, "").toLowerCase().slice(0, 45));
 
-const acr = new containerregistry.Registry(acrName, {
+const acr = new containerregistry.Registry("acr", {
+  registryName: acrName,
   resourceGroupName: rg.name,
   location: rg.location,
   sku: { name: "Basic" },
-  adminUserEnabled: false, // security best practice
+  adminUserEnabled: false, // security baseline
 });
 
-// ---------- User-assigned managed identity for AKS ----------
-const identityName = `id-${base}`.slice(0, 128);
-const aksIdentity = new managedidentity.UserAssignedIdentity(identityName, {
+// ---------------- Managed Identity ----------------
+const identityName = pulumi.interpolate`id-${base}`.apply((s) => s.slice(0, 128));
+
+const aksIdentity = new managedidentity.UserAssignedIdentity("aksIdentity", {
   resourceGroupName: rg.name,
   location: rg.location,
+  resourceName: identityName,
 });
 
-// ---------- AKS ----------
-const aksName = (`aks-${base}`).replace(/[^a-z0-9-]/g, "").slice(0, 30);
+// ---------------- AKS ----------------
+const aksName = pulumi
+  .interpolate`aks-${base}`
+  .apply((s) => s.replace(/[^a-z0-9-]/g, "").slice(0, 30));
 
-const cluster = new containerservice.ManagedCluster(aksName, {
+const cluster = new containerservice.ManagedCluster("aks", {
   resourceGroupName: rg.name,
   location: rg.location,
+  resourceName: aksName,
   dnsPrefix: aksName,
   enableRBAC: true,
 
-  // Good security baseline
+  // Security baseline (Workload Identity + OIDC)
   oidcIssuerProfile: { enabled: true },
   securityProfile: { workloadIdentity: { enabled: true } },
 
   identity: {
     type: "UserAssigned",
-    userAssignedIdentities: {
-      [aksIdentity.id]: {},
-    },
+    userAssignedIdentities: pulumi.all([aksIdentity.id]).apply(([id]) => ({
+      [id]: {},
+    })),
   },
 
   agentPoolProfiles: [
@@ -79,27 +93,29 @@ const cluster = new containerservice.ManagedCluster(aksName, {
   networkProfile: { networkPlugin: "azure" },
 });
 
-// ---------- Allow AKS to pull images from ACR (AcrPull) ----------
-const kubeletObjectId = cluster.identityProfile.apply((p) => p?.kubeletidentity?.objectId);
+// ---------------- AcrPull role assignment ----------------
+// kubelet identity objectId (created by AKS) is needed for ACR pull
+const kubeletObjectId = cluster.identityProfile.apply(
+  (p) => p?.kubeletidentity?.objectId
+);
 
-const acrPullRole = pulumi
-  .output(
-    authorization.getRoleDefinition({
-      roleDefinitionId: "7f951dda-4ed3-4680-a7ca-43fe172d538d", // AcrPull
-      scope: acr.id,
-    }),
-  )
-  .apply((r) => r.id);
+// AcrPull role definition id (well-known)
+const acrPullRoleDefinitionId = "7f951dda-4ed3-4680-a7ca-43fe172d538d";
 
-new authorization.RoleAssignment(`acrpull-${base}`, {
+// Create role assignment name (must be GUID in Azure RBAC in many cases)
+const roleAssignmentGuid = new random.RandomUuid("acrpullGuid");
+
+new authorization.RoleAssignment("acrpull", {
+  scope: acr.id,
   principalId: kubeletObjectId,
   principalType: "ServicePrincipal",
-  roleDefinitionId: acrPullRole,
-  scope: acr.id,
+  roleDefinitionId: pulumi.interpolate`${acr.id}/providers/Microsoft.Authorization/roleDefinitions/${acrPullRoleDefinitionId}`,
+  roleAssignmentName: roleAssignmentGuid.result,
 });
 
-// ---------- Outputs ----------
+// ---------------- Outputs ----------------
 export const resourceGroupName = rg.name;
 export const acrLoginServer = acr.loginServer;
 export const aksClusterName = cluster.name;
+
 export const kubeconfigHint = pulumi.interpolate`az aks get-credentials -g ${rg.name} -n ${cluster.name} --admin`;
